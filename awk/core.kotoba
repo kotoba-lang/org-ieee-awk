@@ -1,0 +1,496 @@
+;; awk -- POSIX awk (IEEE Std 1003.1), a documented SUBSET: the print
+;; statement, over a literal pattern, with an optional explicit field
+;; separator.
+;;
+;;   awk '{print}'                 the record, verbatim
+;;   awk '{print $0}'              the record, verbatim
+;;   awk '{print $N}'              field N, empty past the end
+;;   awk '{print NF}'              how many fields the record has
+;;   awk '/LITERAL/'               the records that contain LITERAL
+;;   awk '/LITERAL/ {print ...}'   the action, on those records only
+;;   awk -FX '...'                 an explicit field separator
+;;
+;; Anything else is REFUSED with a diagnostic. Refusing is the point: a
+;; program this cannot represent must not be half-interpreted into a
+;; plausible-looking wrong answer.
+;;
+;; ## The pattern is literal, not a regular expression
+;;
+;; The same boundary org-ieee-grep ships with as `-F` and org-ieee-sed ships
+;; with for `s///`, named for the same reason: `string-index-of` finds a
+;; literal needle and there is no regular expression engine to call. A pattern
+;; holding a metacharacter means something different to the two
+;; implementations, so the suite compares only literal ones.
+;;
+;; ## What was measured against /usr/bin/awk (version 20200816), 2026-09-10
+;;
+;;   {print} / {print $0}   the record VERBATIM, leading and trailing blanks
+;;                          kept, and a missing final newline is ADDED
+;;   default splitting      on RUNS of space/tab, ignoring leading and
+;;                          trailing ones: "  spaced   out  " is $1=spaced,
+;;                          $2=out, NF=2; a blank-only record is NF=0
+;;   $9 past the end        an EMPTY line -- it still prints a line
+;;   -F:                    empty fields COUNT: `a::b` is NF=3 with $2="";
+;;                          `:lead` is NF=2 with $2=lead; `trail:` is NF=2
+;;                          with $2=""; an EMPTY record is still NF=0
+;;   -F. -Fxy               a single character is LITERAL, not a regular
+;;                          expression, and so is a multi-character one for
+;;                          the literal strings this compares
+;;   -Ft                    a TAB. That is awk's own special case for the
+;;                          letter t, and it is measured, not inferred
+;;   -F' '                  a single SPACE means default splitting
+;;   ''                     an empty program: exit 0, no output, and the
+;;                          operands are never opened -- a missing file is
+;;                          not reported
+;;   missing operand        `awk: can't open file X` on stderr, exit 2, and
+;;                          processing STOPS: later operands are not read
+;;
+;; Capabilities: :cli/args (38), :fs/app-data (35), :io/write (37),
+;; :io/write-error (39).
+(ns awk.core (:export [main]))
+
+(defn arg [i :string] :string
+  (typed-cap-call :cli/args :string :string i))
+
+(defn emit [s :string] :string
+  (typed-cap-call :io/write :string :string s))
+
+(defn emit-error [s :string] :string
+  (typed-cap-call :io/write-error :string :string s))
+
+(defn slurp-file [path :string] :string
+  (typed-cap-call :fs/app-data :string :string path))
+
+(defn exists? [path :string] :bool
+  (string=? (typed-cap-call :fs/app-data :string :string
+                            (string-concat path "EXISTS_SEP"))
+            "1"))
+
+(defn nl [] :string
+  (string-substring "a
+b" 1 2))
+
+;; A one-byte tab, cut from a literal that contains one -- a control
+;; character cannot be written directly in Kotoba source.
+(defn tab [] :string
+  (string-substring "a	b" 1 2))
+
+;; --- numbers cross as decimal text ---------------------------------------
+
+(defn digit-text [d :i64] :string
+  (string-substring "0123456789" d (+ d 1)))
+
+(defn decimal-of [n :i64] :string
+  (if (< n 10)
+    (digit-text n)
+    (string-concat (decimal-of (quot n 10))
+                   (digit-text (- n (* 10 (quot n 10)))))))
+
+(defn digit-value [s :string i :i64] :i64
+  (let [c (string-code-point-at s i)]
+    (if (< c 48) -1 (if (> c 57) -1 (- c 48)))))
+
+(defn text->i64 [s :string i :i64 n :i64 acc :i64] :i64
+  (if (>= i n)
+    acc
+    (let [d (digit-value s i)]
+      (if (< d 0) -1 (text->i64 s (+ i 1) n (+ (* acc 10) d))))))
+
+;; Non-empty and every byte a digit. This stops at the FIRST non-digit rather
+;; than walking on, which is what keeps `string-code-point-at` from ever being
+;; asked about a byte in the middle of a multi-byte character: index 0 is
+;; always a boundary, and the walk only advances past bytes it has already
+;; seen to be ASCII digits.
+(defn all-digits? [s :string i :i64 n :i64] :i64
+  (if (= n 0)
+    0
+    (if (>= i n)
+      1
+      (if (< (digit-value s i) 0) 0 (all-digits? s (+ i 1) n)))))
+
+;; --- blanks --------------------------------------------------------------
+;;
+;; Every offset handed to `string-substring` here is the index of an ASCII
+;; byte -- a space, a tab, a brace, a slash -- or 0, or the string's length.
+;; Nothing else is a code-point boundary, and a substring taken off one traps
+;; the process rather than answering wrongly. Measured 2026-09-10:
+;; `(string-substring "日本" 1 2)` is SIGILL, exit 120. So this file finds
+;; ASCII with `string-index-of` and never counts bytes by hand.
+
+;; The next space or tab at or after FROM, or -1.
+(defn next-blank [s :string from :i64] :i64
+  (let [n (string-byte-length s)
+        t (string-substring s from n)
+        a (string-index-of t " ")
+        b (string-index-of t (tab))]
+    (if (< a 0)
+      (if (< b 0) -1 (+ from b))
+      (if (< b 0)
+        (+ from a)
+        (if (< a b) (+ from a) (+ from b))))))
+
+(defn ltrim [s :string] :string
+  (let [n (string-byte-length s)]
+    (if (= n 0)
+      s
+      (if (= (string-index-of s " ") 0)
+        (ltrim (string-substring s 1 n))
+        (if (= (string-index-of s (tab)) 0)
+          (ltrim (string-substring s 1 n))
+          s)))))
+
+;; Where the trailing run of blanks starts, or the length when there is none.
+;; RUN carries the start of the blank run currently open, or -1. Scanning
+;; FORWARD rather than back is what keeps this boundary-safe: reading the last
+;; byte directly would mean slicing at n-1, which is inside the character when
+;; the string ends in a multi-byte one.
+(defn rtrim-end [s :string from :i64 run :i64] :i64
+  (let [n (string-byte-length s)]
+    (if (>= from n)
+      (if (< run 0) n run)
+      (let [b (next-blank s from)]
+        (if (< b 0)
+          n
+          (rtrim-end s (+ b 1) (if (= b from) (if (< run 0) b run) b)))))))
+
+(defn rtrim [s :string] :string
+  (string-substring s 0 (rtrim-end s 0 -1)))
+
+(defn trim [s :string] :string
+  (ltrim (rtrim s)))
+
+;; The index of the LAST `}`, or -1. Used to ask whether an action's closing
+;; brace is the final byte, which cannot be asked by slicing the end.
+(defn last-brace [s :string from :i64 best :i64] :i64
+  (let [n (string-byte-length s)]
+    (if (>= from n)
+      best
+      (let [t (string-substring s from n)
+            i (string-index-of t "}")]
+        (if (< i 0) best (last-brace s (+ (+ from i) 1) (+ from i)))))))
+
+;; --- the argument vector -------------------------------------------------
+;; `awk [-FX] PROGRAM FILE...`. Only the ATTACHED form of -F is accepted; the
+;; detached `awk -F : prog file`, which the system awk takes, is refused here
+;; and the README says so.
+
+(defn dash-f? [] :bool
+  (= (string-index-of (arg "0") "-F") 0))
+
+(defn fs-raw [] :string
+  (let [a (arg "0")]
+    (string-substring a 2 (string-byte-length a))))
+
+(defn prog-text [] :string
+  (if (dash-f?) (arg "1") (arg "0")))
+
+(defn first-file [] :i64
+  (if (dash-f?) 2 1))
+
+(defn argc [] :i64
+  (let [t (arg "")]
+    (text->i64 t 0 (string-byte-length t) 0)))
+
+;; A single space means default splitting, measured -- `-F' '` over
+;; "  spaced   out  " answers NF=2, not NF=6.
+(defn ws-mode? [] :bool
+  (if (dash-f?) (string=? (fs-raw) " ") true))
+
+;; `-Ft` is a TAB. awk's own special case, measured over a tab-separated
+;; fixture: NF=3 where a literal letter t would have answered NF=1.
+(defn sep [] :string
+  (if (string=? (fs-raw) "t") (tab) (fs-raw)))
+
+;; --- the program ---------------------------------------------------------
+
+(defn body [] :string
+  (trim (prog-text)))
+
+(defn pattern-form? [] :bool
+  (= (string-index-of (body) "/") 0))
+
+;; The index of the closing `/`, or -1 when the pattern is not closed.
+(defn pat-end [] :i64
+  (let [b (body)
+        n (string-byte-length b)
+        i (string-index-of (string-substring b 1 n) "/")]
+    (if (< i 0) -1 (+ i 1))))
+
+(defn pat-text [] :string
+  (string-substring (body) 1 (pat-end)))
+
+(defn after-pat [] :string
+  (let [b (body)
+        n (string-byte-length b)]
+    (trim (string-substring b (+ (pat-end) 1) n))))
+
+;; What should be `{...}`: the whole program, or what follows the pattern.
+(defn braces-src [] :string
+  (if (pattern-form?) (after-pat) (body)))
+
+(defn braced? [] :bool
+  (let [s (braces-src)
+        n (string-byte-length s)]
+    (if (< n 2)
+      false
+      (if (= (string-index-of s "{") 0)
+        (= (last-brace s 0 -1) (- n 1))
+        false))))
+
+;; A pattern with NO action prints the record -- that is awk's default action,
+;; so it is spelled here as the action it means.
+(defn action-text [] :string
+  (let [s (braces-src)
+        n (string-byte-length s)]
+    (if (string=? s "")
+      "print"
+      (trim (string-substring s 1 (- n 1))))))
+
+;; `print`, or `print` followed by a blank. `print$1` and `printNF` are NOT
+;; accepted, though the system awk takes them; refusing is documented rather
+;; than guessed at.
+(defn print-form? [] :bool
+  (let [a (action-text)
+        n (string-byte-length a)]
+    (if (string=? a "print")
+      true
+      (if (< n 6)
+        false
+        (if (= (string-index-of a "print") 0)
+          (let [r (string-substring a 5 n)]
+            (if (= (string-index-of r " ") 0)
+              true
+              (= (string-index-of r (tab)) 0)))
+          false)))))
+
+(defn act-operand [] :string
+  (let [a (action-text)
+        n (string-byte-length a)]
+    (if (string=? a "print")
+      ""
+      (trim (string-substring a 5 n)))))
+
+;; 0 = the whole record, 1 = NF, 2 = a numbered field, -1 = refuse.
+(defn act-kind [] :i64
+  (if (print-form?)
+    (let [o (act-operand)
+          n (string-byte-length o)]
+      (if (string=? o "")
+        0
+        (if (string=? o "NF")
+          1
+          (if (= (string-index-of o "$") 0)
+            (if (= (all-digits? (string-substring o 1 n) 0 (- n 1)) 1)
+              (if (= (text->i64 (string-substring o 1 n) 0 (- n 1) 0) 0) 0 2)
+              -1)
+            -1))))
+    -1))
+
+(defn field-index [] :i64
+  (let [o (act-operand)
+        n (string-byte-length o)]
+    (text->i64 (string-substring o 1 n) 0 (- n 1) 0)))
+
+(defn program-ok? [] :bool
+  (if (pattern-form?)
+    (if (< (pat-end) 0)
+      false
+      (if (string=? (after-pat) "")
+        (>= (act-kind) 0)
+        (if (braced?) (>= (act-kind) 0) false)))
+    (if (braced?) (>= (act-kind) 0) false)))
+
+;; --- fields --------------------------------------------------------------
+;;
+;; Two different questions, kept apart because awk answers them differently.
+;; Default splitting collapses RUNS of blanks and ignores them at both ends,
+;; so "  a   b  " has two fields. An explicit separator does not collapse
+;; anything, so `a::b` under -F: has THREE, the middle one empty.
+
+(defn ws-count [s :string acc :i64] :i64
+  (let [t (ltrim s)
+        n (string-byte-length t)]
+    (if (= n 0)
+      acc
+      (let [b (next-blank t 0)]
+        (if (< b 0)
+          (+ acc 1)
+          (ws-count (string-substring t (+ b 1) n) (+ acc 1)))))))
+
+(defn ws-field [s :string k :i64] :string
+  (let [t (ltrim s)
+        n (string-byte-length t)]
+    (if (= n 0)
+      ""
+      (let [b (next-blank t 0)]
+        (if (= k 1)
+          (if (< b 0) t (string-substring t 0 b))
+          (if (< b 0) "" (ws-field (string-substring t (+ b 1) n) (- k 1))))))))
+
+(defn sep-count [s :string d :string acc :i64] :i64
+  (let [i (string-index-of s d)]
+    (if (< i 0)
+      (+ acc 1)
+      (sep-count (string-substring s (+ i (string-byte-length d))
+                                   (string-byte-length s))
+                 d (+ acc 1)))))
+
+(defn sep-field [s :string d :string k :i64] :string
+  (let [i (string-index-of s d)
+        n (string-byte-length s)]
+    (if (< i 0)
+      (if (= k 1) s "")
+      (if (= k 1)
+        (string-substring s 0 i)
+        (sep-field (string-substring s (+ i (string-byte-length d)) n)
+                   d (- k 1))))))
+
+;; An EMPTY record is NF=0 whichever mode is in force -- measured under -F:
+;; as well as by default, where it would otherwise have counted as one empty
+;; field.
+(defn nf-of [rec :string] :i64
+  (if (= (string-byte-length rec) 0)
+    0
+    (if (ws-mode?) (ws-count rec 0) (sep-count rec (sep) 0))))
+
+(defn field-of [rec :string k :i64] :string
+  (if (= k 0)
+    rec
+    (if (ws-mode?) (ws-field rec k) (sep-field rec (sep) k))))
+
+;; --- records -------------------------------------------------------------
+
+(defn matches? [rec :string] :bool
+  (if (pattern-form?)
+    (if (string=? (pat-text) "")
+      true
+      (>= (string-index-of rec (pat-text)) 0))
+    true))
+
+;; print always terminates its line, which is why an input whose last line has
+;; no newline gains one.
+(defn show [rec :string] :i64
+  (if (matches? rec)
+    (do
+      (if (= (act-kind) 1)
+        (emit (decimal-of (nf-of rec)))
+        (emit (field-of rec (if (= (act-kind) 2) (field-index) 0))))
+      (emit (nl))
+      0)
+    0))
+
+(defn walk [rest :string] :i64
+  (let [i (string-index-of rest (nl))
+        n (string-byte-length rest)]
+    (if (< i 0)
+      (if (= n 0) 0 (do (show rest) 0))
+      (do
+        (show (string-substring rest 0 i))
+        (walk (string-substring rest (+ i 1) n))))))
+
+(defn rec-count [rest :string acc :i64] :i64
+  (let [i (string-index-of rest (nl))
+        n (string-byte-length rest)]
+    (if (< i 0)
+      (if (= n 0) acc (+ acc 1))
+      (rec-count (string-substring rest (+ i 1) n) (+ acc 1)))))
+
+;; --- operands ------------------------------------------------------------
+;;
+;; The diagnostic for a file that will not open carries two more lines than it
+;; looks like it should, and they are measured rather than guessed:
+;;
+;;   awk: can't open file nope.txt
+;;    input record number 3, file nope.txt
+;;    source line number 1
+;;
+;; The middle line appears only when SOME record has already been read (awk's
+;; own condition is NR > 0), and the number it carries is FNR -- the record
+;; count of the file just before, not the running total. Measured
+;; 2026-09-10:
+;;
+;;   plain colon nope   -> 3   plain has 2 records and colon 3; NR is 5
+;;   plain empty nope   -> 0   an empty file opens and resets FNR
+;;   empty nope         -> the line is absent: nothing had been read
+;;
+;; The name in the first line is awk's argv[0]; the system awk prints whatever
+;; path invoked it. There is no capability that answers "what am I called", so
+;; this says `awk`, and the suite gives the system awk the same argv[0] rather
+;; than comparing two different questions.
+
+(defn any-recs? [j :i64 limit :i64] :bool
+  (if (>= j limit)
+    false
+    (if (> (rec-count (slurp-file (arg (decimal-of j))) 0) 0)
+      true
+      (any-recs? (+ j 1) limit))))
+
+(defn complain [i :i64 path :string] :i64
+  (do
+    (emit-error "awk: can't open file ")
+    (emit-error path)
+    (emit-error (nl))
+    (if (any-recs? (first-file) i)
+      (do
+        (emit-error " input record number ")
+        (emit-error (decimal-of
+                     (rec-count (slurp-file (arg (decimal-of (- i 1)))) 0)))
+        (emit-error ", file ")
+        (emit-error path)
+        (emit-error (nl)))
+      "")
+    (emit-error " source line number 1")
+    (emit-error (nl))
+    2))
+
+;; A file that will not open STOPS the run -- measured: `awk '{print}'
+;; nope.txt plain` writes nothing from plain and exits 2. cut and sed both
+;; carry on and report at the end; awk does not, so this returns rather than
+;; recursing.
+(defn each [i :i64 total :string] :i64
+  (if (string=? (decimal-of i) total)
+    0
+    (let [path (arg (decimal-of i))]
+      (if (exists? path)
+        (do (walk (slurp-file path)) (each (+ i 1) total))
+        (complain i path)))))
+
+(defn run [] :i64
+  ;; An empty program exits 0 without opening anything -- measured, `awk ''
+  ;; nope.txt` reports no error at all. So this decides emptiness before it
+  ;; looks at the operands.
+  (if (string=? (body) "")
+    0
+    (if (program-ok?)
+      (if (>= (first-file) (argc))
+        ;; POSIX reads standard input; there is no stdin capability, so this
+        ;; refuses rather than pretending to have read an empty one, and
+        ;; rather than hanging.
+        (do (emit-error "awk: no file operand: this awk cannot read standard input")
+            (emit-error (nl))
+            2)
+        (each (first-file) (arg "")))
+      (do (emit-error "awk: unsupported program: ")
+          (emit-error (prog-text))
+          (emit-error (nl))
+          2))))
+
+(defn main [] :i64
+  (if (= (argc) 0)
+    (do (emit-error "awk: usage: awk [-Fsep] 'program' file ...")
+        (emit-error (nl))
+        2)
+    (if (dash-f?)
+      (if (string=? (fs-raw) "")
+        ;; The system awk reads the NEXT argument as the separator here. That
+        ;; is the detached form, which this does not accept, so it refuses
+        ;; instead of silently reading the program as a separator.
+        (do (emit-error "awk: -F needs its separator attached, as -Fx")
+            (emit-error (nl))
+            2)
+        (if (< (argc) 2)
+          (do (emit-error "awk: no program text")
+              (emit-error (nl))
+              2)
+          (run)))
+      (run))))
