@@ -101,7 +101,7 @@ missing-file cases and nothing else, which is the evidence that it is narrow.
 
 ## Divergences this owns
 
-Asserted against written-out bytes in `test/awk_test.cljs`, and not compared —
+Asserted against written-out bytes in `test/awk_test.cljk`, and not compared —
 the system awk answers a different question in each.
 
 | input | here | `/usr/bin/awk` |
@@ -197,7 +197,7 @@ program ends in a multi-byte one. A refused program can end in anything.
 ## Build and test
 
 ```sh
-AMU_HOME=/path/to/amu nbb test/awk_test.cljs
+AMU_HOME=/path/to/amu nbb test/awk_test.cljk
 ```
 
 The test compiles `awk/core.kotoba` itself (`compile --target aarch64-macos

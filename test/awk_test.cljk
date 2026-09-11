@@ -1,4 +1,4 @@
-;; test/awk_test.cljs -- build the command and compare it with the system awk,
+;; test/awk_test.cljk -- build the command and compare it with the system awk,
 ;; byte for byte, on stdout, stderr AND exit status.
 ;;
 ;; ## A case is a MAP, not a vector, and that is deliberate
