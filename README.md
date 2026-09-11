@@ -197,7 +197,7 @@ program ends in a multi-byte one. A refused program can end in anything.
 ## Build and test
 
 ```sh
-AMU_HOME=/path/to/amu nbb test/awk_test.cljk
+AMU_HOME=/path/to/amu kbb --backend sci test/awk_test.cljk
 ```
 
 The test compiles `awk/core.kotoba` itself (`compile --target aarch64-macos
