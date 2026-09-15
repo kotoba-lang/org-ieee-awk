@@ -348,45 +348,60 @@ b" 1 2))
 ;; An EMPTY record is NF=0 whichever mode is in force -- measured under -F:
 ;; as well as by default, where it would otherwise have counted as one empty
 ;; field.
-(defn nf-of [rec :string] :i64
+;; --- the program, read ONCE ----------------------------------------------
+;;
+;; Until 2026-09-15 every record re-derived the action kind, the field
+;; index, the pattern and the separator from argv: `act-kind` alone is
+;; `print-form?` -> `action-text` -> `body` -> `trim (prog-text)` -> wire 38,
+;; and every wire answer is interned in the pool with a handle. Measured on
+;; a 33 MB file: 362 pair handles and 275 pool bytes per record, SIGILL at
+;; record 185,055 with the 64 Mi handle arena spent. The program is now
+;; read once in `run` into CFG -- `kind + 4 * ws + 8 * pattern-form + 16 *
+;; field-index` -- plus the pattern text and the separator, and carried.
+(defn cfg-kind [cfg :i64] :i64 (- cfg (* 4 (quot cfg 4))))
+(defn cfg-ws? [cfg :i64] :bool (= 1 (- (quot cfg 4) (* 2 (quot cfg 8)))))
+(defn cfg-pattern? [cfg :i64] :bool (= 1 (- (quot cfg 8) (* 2 (quot cfg 16)))))
+(defn cfg-field [cfg :i64] :i64 (quot cfg 16))
+
+(defn nf-of [rec :string cfg :i64 sepd :string] :i64
   (if (= (string-byte-length rec) 0)
     0
-    (if (ws-mode?) (ws-count rec 0) (sep-count rec (sep) 0))))
+    (if (cfg-ws? cfg) (ws-count rec 0) (sep-count rec sepd 0))))
 
-(defn field-of [rec :string k :i64] :string
+(defn field-of [rec :string k :i64 cfg :i64 sepd :string] :string
   (if (= k 0)
     rec
-    (if (ws-mode?) (ws-field rec k) (sep-field rec (sep) k))))
+    (if (cfg-ws? cfg) (ws-field rec k) (sep-field rec sepd k))))
 
 ;; --- records -------------------------------------------------------------
 
-(defn matches? [rec :string] :bool
-  (if (pattern-form?)
-    (if (string=? (pat-text) "")
+(defn matches? [rec :string cfg :i64 pat :string] :bool
+  (if (cfg-pattern? cfg)
+    (if (string=? pat "")
       true
-      (>= (string-index-of rec (pat-text)) 0))
+      (>= (string-index-of rec pat) 0))
     true))
 
 ;; print always terminates its line, which is why an input whose last line has
 ;; no newline gains one.
-(defn show [rec :string] :i64
-  (if (matches? rec)
+(defn show [rec :string cfg :i64 pat :string sepd :string] :i64
+  (if (matches? rec cfg pat)
     (do
-      (if (= (act-kind) 1)
-        (emit (decimal-of (nf-of rec)))
-        (emit (field-of rec (if (= (act-kind) 2) (field-index) 0))))
+      (if (= (cfg-kind cfg) 1)
+        (emit (decimal-of (nf-of rec cfg sepd)))
+        (emit (field-of rec (if (= (cfg-kind cfg) 2) (cfg-field cfg) 0) cfg sepd)))
       (emit (nl))
       0)
     0))
 
-(defn walk [rest :string] :i64
+(defn walk [rest :string cfg :i64 pat :string sepd :string] :i64
   (let [i (string-index-of rest (nl))
         n (string-byte-length rest)]
     (if (< i 0)
-      (if (= n 0) 0 (do (show rest) 0))
+      (if (= n 0) 0 (do (show rest cfg pat sepd) 0))
       (do
-        (show (string-substring rest 0 i))
-        (walk (string-substring rest (+ i 1) n))))))
+        (show (string-substring rest 0 i) cfg pat sepd)
+        (walk (string-substring rest (+ i 1) n) cfg pat sepd)))))
 
 (defn rec-count [rest :string acc :i64] :i64
   (let [i (string-index-of rest (nl))
@@ -447,13 +462,20 @@ b" 1 2))
 ;; nope.txt plain` writes nothing from plain and exits 2. cut and sed both
 ;; carry on and report at the end; awk does not, so this returns rather than
 ;; recursing.
-(defn each [i :i64 total :string] :i64
+(defn each [i :i64 total :string cfg :i64 pat :string sepd :string] :i64
   (if (string=? (decimal-of i) total)
     0
     (let [path (arg (decimal-of i))]
       (if (exists? path)
-        (do (walk (slurp-file path)) (each (+ i 1) total))
+        (do (walk (slurp-file path) cfg pat sepd) (each (+ i 1) total cfg pat sepd))
         (complain i path)))))
+
+;; CFG, PAT and SEPD as `show` wants them, derived from argv exactly once.
+(defn config [] :i64
+  (+ (act-kind)
+     (+ (if (ws-mode?) 4 0)
+        (+ (if (pattern-form?) 8 0)
+           (* 16 (if (= (act-kind) 2) (field-index) 0))))))
 
 (defn run [] :i64
   ;; An empty program exits 0 without opening anything -- measured, `awk ''
@@ -469,7 +491,9 @@ b" 1 2))
         (do (emit-error "awk: no file operand: this awk cannot read standard input")
             (emit-error (nl))
             2)
-        (each (first-file) (arg "")))
+        (each (first-file) (arg "") (config)
+              (if (pattern-form?) (pat-text) "")
+              (if (ws-mode?) "" (sep))))
       (do (emit-error "awk: unsupported program: ")
           (emit-error (prog-text))
           (emit-error (nl))
