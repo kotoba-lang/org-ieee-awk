@@ -23,6 +23,29 @@ half-interpreted. `{print $1, $2}` is not "print $1"; it is a program this
 cannot represent, and answering it with a plausible-looking wrong line is worse
 than refusing it.
 
+## The program is read once (2026-09-15)
+
+Every record used to re-derive the action, the field index, the pattern
+and the separator from argv — `act-kind` alone is `print-form?` →
+`action-text` → `body` → `trim (prog-text)` → wire 38 — and every wire
+answer is interned in the string pool with a handle. Measured on a 33 MB
+file: **362 handles and 275 pool bytes per record**, SIGILL at record
+185,055 with the 64 Mi handle arena spent. `run` now reads the program once
+into a packed `cfg` plus the pattern and separator strings and carries them
+through `each` → `walk` → `show`.
+
+Measured 2026-09-15, CPU seconds, output identical to `/usr/bin/awk`:
+
+| program | 3.3 MB (76,940 records) | 33 MB (769,400 records) | `/usr/bin/awk`, 33 MB |
+|---|---|---|---|
+| `{print $2}` | 0.13 s (was 0.88) | 1.31 s (was SIGILL) | 1.36 s |
+| `{print NF}` | 0.27 s | 2.60 s | — |
+| `/SIGILL/` | 0.04 s | 0.36 s | — |
+| `{print}` | 0.04 s | 0.40 s | — |
+
+What remains per record is the field walk: `ltrim` and `next-blank` are
+one-byte views and two host searches per blank run.
+
 ## The pattern is literal, not a regular expression
 
 The same boundary [`org-ieee-grep`](https://github.com/kotoba-lang/org-ieee-grep)
