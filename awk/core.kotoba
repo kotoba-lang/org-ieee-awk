@@ -407,12 +407,15 @@ b" 1 2))
   (let [n (string-byte-length text)]
     (if (>= pos n)
       0
-      (let [i (arena-scope (string-index-of (string-substring text pos n) (nl)))]
+      ;; One host search from POS (`string-index-of-from`, context ABI v8),
+      ;; no view; the newline literal is a handle per evaluation, hence the
+      ;; region.
+      (let [i (arena-scope (string-index-of-from text (nl) pos))]
         (if (< i 0)
           (do (arena-scope (show (string-substring text pos n) cfg pat sepd)) 0)
           (do
-            (arena-scope (show (string-substring text pos (+ pos i)) cfg pat sepd))
-            (walk-from text (+ pos (+ i 1)) cfg pat sepd)))))))
+            (arena-scope (show (string-substring text pos i) cfg pat sepd))
+            (walk-from text (+ i 1) cfg pat sepd)))))))
 
 (defn walk [text :string cfg :i64 pat :string sepd :string] :i64
   (walk-from text 0 cfg pat sepd))
@@ -420,10 +423,10 @@ b" 1 2))
 (defn rec-count-from [text :string pos :i64 n :i64 acc :i64] :i64
   (if (>= pos n)
     acc
-    (let [i (arena-scope (string-index-of (string-substring text pos n) (nl)))]
+    (let [i (arena-scope (string-index-of-from text (nl) pos))]
       (if (< i 0)
         (+ acc 1)
-        (rec-count-from text (+ pos (+ i 1)) n (+ acc 1))))))
+        (rec-count-from text (+ i 1) n (+ acc 1))))))
 
 (defn rec-count [text :string acc :i64] :i64
   (rec-count-from text 0 (string-byte-length text) acc))
