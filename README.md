@@ -45,7 +45,9 @@ Measured, CPU seconds user, output identical to `/usr/bin/awk`:
 
 Re-measured on context ABI v8 (2026-09-16), the record walk searching
 from an offset with no view (`string-index-of-from`): `{print $2}` 0.32 →
-**0.26** s, `{print NF}` 0.42, `/SIGILL/` 0.10, `{print}` 0.20 → **0.15**.
+**0.26** s, `{print NF}` 0.42, `/SIGILL/` 0.10, `{print}` 0.20 → **0.15**. On context ABI v10 the record walk finds the newline as a byte
+(`string-find-byte`, no needle handle, no region): `{print $2}` 0.26 →
+**0.23 s**.
 
 ## The field walk is one host scan per blank run (2026-09-16)
 
