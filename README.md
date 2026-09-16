@@ -34,17 +34,31 @@ file: **362 handles and 275 pool bytes per record**, SIGILL at record
 into a packed `cfg` plus the pattern and separator strings and carries them
 through `each` → `walk` → `show`.
 
-Measured 2026-09-15, CPU seconds, output identical to `/usr/bin/awk`:
+Measured, CPU seconds user, output identical to `/usr/bin/awk`:
 
-| program | 3.3 MB (76,940 records) | 33 MB (769,400 records) | `/usr/bin/awk`, 33 MB |
+| program | 33 MB (769,400 records), 2026-09-16 | 33 MB, 2026-09-15 | `/usr/bin/awk`, 33 MB |
 |---|---|---|---|
-| `{print $2}` | 0.13 s (was 0.88) | 1.31 s (was SIGILL) | 1.36 s |
-| `{print NF}` | 0.27 s | 2.60 s | — |
-| `/SIGILL/` | 0.04 s | 0.36 s | — |
-| `{print}` | 0.04 s | 0.40 s | — |
+| `{print $2}` | **0.32 s** | 1.31 s (before 2026-09-15: SIGILL) | 1.11 s |
+| `{print NF}` | **0.42 s** | 2.60 s | 1.20 s |
+| `/SIGILL/` | **0.09 s** | 0.36 s | 1.41 s |
+| `{print}` | **0.20 s** | 0.40 s | 1.14 s |
 
-What remains per record is the field walk: `ltrim` and `next-blank` are
-one-byte views and two host searches per blank run.
+## The field walk is one host scan per blank run (2026-09-16)
+
+`next-blank` is `string-find-blank` (amu context ABI v7): one scan that
+stops at the first blank, where it had been a view and two whole-line
+searches per blank run — the tab search walking to the line's end on
+every line without one. The host's blank set is six characters and awk's
+default separator is **space and tab only** (measured: `a\vb\fc\rd e` has
+two fields, `\va b` keeps its `\v` in `$1`), so a `\v`, `\f` or `\r` the
+scan stops on is read — it is ASCII, so a boundary — and stepped over.
+`ltrim` reads one code point per leading blank instead of searching the
+whole line for a space and again for a tab.
+
+Records are walked by a scalar cursor and every record is a region
+(`arena-scope`, ABI v6): its search view, its fields and its writes are
+released as `show` answers, so the 33 MB file runs under the loader's
+**default 4,096 handles** (the table above was packaged with them).
 
 ## The pattern is literal, not a regular expression
 
