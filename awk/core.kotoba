@@ -498,6 +498,9 @@ b" 1 2))
         (+ (if (pattern-form?) 8 0)
            (* 16 (if (= (act-kind) 2) (field-index) 0))))))
 
+(defn stdin [n :string] :string
+  (typed-cap-call :io/read :string :string n))
+
 (defn run [] :i64
   ;; An empty program exits 0 without opening anything -- measured, `awk ''
   ;; nope.txt` reports no error at all. So this decides emptiness before it
@@ -506,12 +509,14 @@ b" 1 2))
     0
     (if (program-ok?)
       (if (>= (first-file) (argc))
-        ;; POSIX reads standard input; there is no stdin capability, so this
-        ;; refuses rather than pretending to have read an empty one, and
-        ;; rather than hanging.
-        (do (emit-error "awk: no file operand: this awk cannot read standard input")
-            (emit-error (nl))
-            2)
+        ;; No file operand: standard input, whole (wire 41, 2026-09-16 --
+        ;; 81% of awk's invocations in agent tool use are a later pipeline
+        ;; segment, 3,883 of 4,800 measured). Input past the string pool is
+        ;; refused, never walked short.
+        (do (walk (stdin "") (config)
+                  (if (pattern-form?) (pat-text) "")
+                  (if (ws-mode?) "" (sep)))
+            0)
         (each (first-file) (arg "") (config)
               (if (pattern-form?) (pat-text) "")
               (if (ws-mode?) "" (sep))))
