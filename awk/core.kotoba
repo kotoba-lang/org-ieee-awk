@@ -117,27 +117,31 @@ b" 1 2))
 ;; `(string-substring "日本" 1 2)` is SIGILL, exit 120. So this file finds
 ;; ASCII with `string-index-of` and never counts bytes by hand.
 
-;; The next space or tab at or after FROM, or -1.
+;; The next space or tab at or after FROM, or -1. One host scan
+;; (`string-find-blank`, context ABI v7, 2026-09-16) that stops at the
+;; first of the host's six blanks; awk's default separator is space and
+;; tab ONLY -- measured 2026-09-16, `a\vb\fc\rd e` has two fields and
+;; `\va b` keeps its \v in $1 -- so a \v, \f or \r the scan stops on is
+;; read (it is ASCII, so a boundary) and stepped over. Until then this was
+;; a view and two whole-line searches per blank run, the tab search
+;; walking to the line's end on every line without one.
 (defn next-blank [s :string from :i64] :i64
-  (let [n (string-byte-length s)
-        t (string-substring s from n)
-        a (string-index-of t " ")
-        b (string-index-of t (tab))]
-    (if (< a 0)
-      (if (< b 0) -1 (+ from b))
-      (if (< b 0)
-        (+ from a)
-        (if (< a b) (+ from a) (+ from b))))))
+  (let [k (string-find-blank s from)]
+    (if (< k 0)
+      -1
+      (let [c (string-code-point-at s k)]
+        (if (= c 32) k (if (= c 9) k (next-blank s (+ k 1))))))))
 
+;; Leading spaces and tabs dropped: one code point read per leading blank,
+;; a boundary because offset 0 always is and a blank is one byte.
 (defn ltrim [s :string] :string
   (let [n (string-byte-length s)]
     (if (= n 0)
       s
-      (if (= (string-index-of s " ") 0)
-        (ltrim (string-substring s 1 n))
-        (if (= (string-index-of s (tab)) 0)
+      (let [c (string-code-point-at s 0)]
+        (if (= c 32)
           (ltrim (string-substring s 1 n))
-          s)))))
+          (if (= c 9) (ltrim (string-substring s 1 n)) s))))))
 
 ;; Where the trailing run of blanks starts, or the length when there is none.
 ;; RUN carries the start of the blank run currently open, or -1. Scanning
@@ -394,21 +398,35 @@ b" 1 2))
       0)
     0))
 
-(defn walk [rest :string cfg :i64 pat :string sepd :string] :i64
-  (let [i (string-index-of rest (nl))
-        n (string-byte-length rest)]
-    (if (< i 0)
-      (if (= n 0) 0 (do (show rest cfg pat sepd) 0))
-      (do
-        (show (string-substring rest 0 i) cfg pat sepd)
-        (walk (string-substring rest (+ i 1) n) cfg pat sepd)))))
+;; Records by a scalar cursor over the text: the search view and every
+;; handle a record's `show` cuts (its view, its fields, its writes) are
+;; released as the region (arena-scope, ABI v6) answers, so a file leaves
+;; nothing in the arena per record. TEXT and POS are packed for the arity:
+;; the walk carries `text cfg pat sepd` and the cursor.
+(defn walk-from [text :string pos :i64 cfg :i64 pat :string sepd :string] :i64
+  (let [n (string-byte-length text)]
+    (if (>= pos n)
+      0
+      (let [i (arena-scope (string-index-of (string-substring text pos n) (nl)))]
+        (if (< i 0)
+          (do (arena-scope (show (string-substring text pos n) cfg pat sepd)) 0)
+          (do
+            (arena-scope (show (string-substring text pos (+ pos i)) cfg pat sepd))
+            (walk-from text (+ pos (+ i 1)) cfg pat sepd)))))))
 
-(defn rec-count [rest :string acc :i64] :i64
-  (let [i (string-index-of rest (nl))
-        n (string-byte-length rest)]
-    (if (< i 0)
-      (if (= n 0) acc (+ acc 1))
-      (rec-count (string-substring rest (+ i 1) n) (+ acc 1)))))
+(defn walk [text :string cfg :i64 pat :string sepd :string] :i64
+  (walk-from text 0 cfg pat sepd))
+
+(defn rec-count-from [text :string pos :i64 n :i64 acc :i64] :i64
+  (if (>= pos n)
+    acc
+    (let [i (arena-scope (string-index-of (string-substring text pos n) (nl)))]
+      (if (< i 0)
+        (+ acc 1)
+        (rec-count-from text (+ pos (+ i 1)) n (+ acc 1))))))
+
+(defn rec-count [text :string acc :i64] :i64
+  (rec-count-from text 0 (string-byte-length text) acc))
 
 ;; --- operands ------------------------------------------------------------
 ;;
