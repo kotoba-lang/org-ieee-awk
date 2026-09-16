@@ -43,7 +43,7 @@
 
 (defn- run [cmd args opts]
   (let [r (.spawnSync cp cmd (clj->js args)
-                      (clj->js (merge {:encoding "buffer"} opts)))]
+                      (clj->js (merge {:encoding "buffer" :maxBuffer 67108864} opts)))]
     {:status (.-status r) :out (.-stdout r) :err (.-stderr r)}))
 
 (defn- refuse [message]
@@ -259,17 +259,23 @@
    ;; still READ, so the line appears even though nothing was printed.
    {:prog "/zz/" :files ["plain" "nope.txt"]}
    ;; With a separator in play.
-   {:fs "-F:" :prog "{print NF}" :files ["colon" "nope.txt"]}])
+   {:fs "-F:" :prog "{print NF}" :files ["colon" "nope.txt"]}
+   ;; --- standard input (wire 41, 2026-09-16) ---------------------------
+   ;; 81% of awk's invocations in agent tool use are a later pipeline
+   ;; segment (3,883 of 4,800 measured); `grep | awk` alone is 826.
+   {:prog "{print}" :stdin "plain"}
+   {:prog "{print $1}" :stdin "plain"}
+   {:prog "{print $2}" :stdin "spaced"}
+   {:prog "{print NF}" :stdin "plain"}
+   {:fs "-F:" :prog "{print $2}" :stdin "colon"}
+   {:prog "/alpha/" :stdin "plain"}
+   {:prog "{print}" :stdin "empty"}])
 
 ;; Behaviours this deliberately does NOT share with the system awk. These are
 ;; NOT comparisons -- the expected bytes are written out here, because the
 ;; system awk answers a different question. Each is named in the README.
 (def divergences
-  [{:label "no file operand: refuses rather than reading standard input"
-    :argv ["{print}"]
-    :out "" :exit 2
-    :err "awk: no file operand: this awk cannot read standard input\n"}
-   {:label "a program outside the subset is refused, not half-interpreted"
+  [{:label "a program outside the subset is refused, not half-interpreted"
     :argv ["{print $1, $2}" :plain]
     :out "" :exit 2
     :err "awk: unsupported program: {print $1, $2}\n"}
@@ -315,7 +321,15 @@
 (defn- setup-guard []
   (doseq [c cases]
     (when-not (:prog c) (refuse (str "case has no :prog: " (pr-str c))))
-    (when (empty? (:files c)) (refuse (str "case has no :files: " (pr-str c))))
+    ;; A case reads its operands OR standard input -- one of the two, never
+    ;; neither (nothing would be tested) and never both (awk ignores stdin
+    ;; when it has operands, so the :stdin would be decoration).
+    (when (and (empty? (:files c)) (not (:stdin c)))
+      (refuse (str "case has no :files and no :stdin: " (pr-str c))))
+    (when (and (seq (:files c)) (:stdin c))
+      (refuse (str "case has both :files and :stdin: " (pr-str c))))
+    (when (and (:stdin c) (not (contains? fixtures (:stdin c))))
+      (refuse (str "case's :stdin is not a fixture: " (pr-str c))))
     (doseq [f (:files c)]
       (when-not (or (contains? fixtures f) (contains? absent f))
         (refuse (str "case names " (pr-str f) ", which is neither a fixture nor "
@@ -347,7 +361,7 @@
         data (.join path tmp "data")]
     (when-not (.existsSync fs src) (refuse (str "no source at " src)))
     (.writeFileSync fs policy
-                    "{:allow #{[:cap/call 35] [:cap/call 37] [:cap/call 38] [:cap/call 39]}}" "utf8")
+                    "{:allow #{[:cap/call 35] [:cap/call 37] [:cap/call 38] [:cap/call 39] [:cap/call 41]}}" "utf8")
     (.mkdirSync fs data)
     (doseq [[name content] fixtures]
       (.writeFileSync fs (.join path data name) content "utf8"))
@@ -366,7 +380,7 @@
           offset (second (re-find #":offset (\d+)" report))]
       (when-not offset (refuse (str "no :offset in the extract report: " report)))
       (let [p (run "node" [kbb "--backend" "sci" packager "--code" blob "--offset" offset "--isa" "aarch64"
-                          "--allow" "35,37,38,39"
+                          "--allow" "35,37,38,39,41"
                           "--fs-scope" (.realpathSync fs data)
                           "--string-pool" "4000000" "--fuel" "50000000"
                           "--pairs" "200000" "--output" exe] {})]
@@ -407,10 +421,17 @@
           (for [c cases]
             (let [argv (argv-of c)
                   _ (verify-argv! c argv)
-                  k (run exe argv {})
+                  ;; :stdin names a fixture fed as standard input to BOTH
+                  ;; binaries (no :files then); as a Buffer, since spawnSync
+                  ;; applies :encoding "buffer" to a string input and refuses.
+                  input (when (:stdin c)
+                          (or (get fixtures (:stdin c))
+                              (refuse (str "no fixture " (:stdin c) " for a stdin case"))))
+                  opts (if input {:input (js/Buffer.from input "utf8")} {})
+                  k (run exe argv opts)
                   ;; argv0 "awk" so the system awk's diagnostics name it the
                   ;; way the built command must: see the header.
-                  s (run system-awk argv {:argv0 "awk"})
+                  s (run system-awk argv (assoc opts :argv0 "awk"))
                   same? (and (= (b64 (:out k)) (b64 (:out s)))
                              (= (b64 (:err k)) (b64 (:err s)))
                              (= (:status k) (:status s)))]

@@ -149,7 +149,6 @@ the system awk answers a different question in each.
 
 | input | here | `/usr/bin/awk` |
 |---|---|---|
-| no file operand | `awk: no file operand: this awk cannot read standard input`, exit 2 | reads standard input |
 | `{print $1, $2}` | `awk: unsupported program: …`, exit 2 | prints two fields |
 | `{print $x}` | refused at parse, exit 2 | `illegal field $(), name "x"` at the first record, exit 2 |
 | `{print $}` | refused, exit 2 | a three-line syntax error, exit 2 |
@@ -258,4 +257,14 @@ Exactly the four wires used, and no more.
 No `BEGIN`/`END`, no variables or assignment, no arithmetic or comparison
 patterns, no ranges, no `printf`, `getline`, `split`, `substr`, `gsub`, no
 field assignment, no `-v`, `-f` or `--`, no output redirection, no comma in a
-print list, no regular expressions, and no reading standard input.
+print list, no regular expressions.
+
+## Standard input
+
+With no file operand `awk` reads standard input (wire 41 `:io/read`,
+2026-09-16) — 81% of how it is invoked in agent tool use (3,883 of 4,800 over
+1,268,018 measured Bash calls; `grep | awk` alone is 826). Until the wire
+landed this was a named divergence (`awk: no file operand: this awk cannot
+read standard input`, exit 2); it is now a compared case. Whole-input form:
+input larger than the binary's string pool is refused (exit 120), never
+walked short.
