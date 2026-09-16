@@ -43,6 +43,10 @@ Measured, CPU seconds user, output identical to `/usr/bin/awk`:
 | `/SIGILL/` | **0.09 s** | 0.36 s | 1.41 s |
 | `{print}` | **0.20 s** | 0.40 s | 1.14 s |
 
+Re-measured on context ABI v8 (2026-09-16), the record walk searching
+from an offset with no view (`string-index-of-from`): `{print $2}` 0.32 →
+**0.26** s, `{print NF}` 0.42, `/SIGILL/` 0.10, `{print}` 0.20 → **0.15**.
+
 ## The field walk is one host scan per blank run (2026-09-16)
 
 `next-blank` is `string-find-blank` (amu context ABI v7): one scan that
