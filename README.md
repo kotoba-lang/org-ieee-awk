@@ -1,21 +1,27 @@
-# kotoba-lang/org-ieee-awk — POSIX `awk`, the print statement
+# kotoba-lang/org-ieee-awk — POSIX `awk`, the print statement over regex patterns
 
 A documented **subset** of `awk` from IEEE Std 1003.1 — the `print` statement,
-over a **literal** pattern, with an optional explicit field separator — written
-in `.kotoba` and compiled to a standalone native executable.
+over a regular-expression pattern (on the record, on a field, or a range),
+with an optional explicit field separator and `exit` — written in `.kotoba`,
+compiled to a standalone native executable, linked with
+[`org-ieee-regex`](https://github.com/kotoba-lang/org-ieee-regex).
 
 ```sh
 ./awk '{print}'                 # the record, verbatim
 ./awk '{print $0}'              # the record, verbatim
 ./awk '{print $N}'              # field N, empty past the end
 ./awk '{print NF}'              # how many fields the record has
-./awk '/LITERAL/'               # the records that contain LITERAL
-./awk '/LITERAL/ {print ...}'   # the action, on those records only
+./awk '/RE/'                    # the records matching RE (an ERE)
+./awk '/RE/ {print ...}'        # the action, on those records only
+./awk '$N ~ /RE/ {print ...}'   # on records whose field N matches
+./awk '/A/,/B/ {print ...}'     # from a record matching A through the next matching B
+./awk '/A/,0'                   # from A to the end of the input
+./awk '/RE/ {print $N; exit}'   # the first such record, then stop
 ./awk -FX '...'                 # an explicit field separator
 ```
 
-Ninety-two cases agree with `/usr/bin/awk` (version 20200816) on stdout, stderr
-and exit status. Ten more are divergences this deliberately owns, asserted
+133 cases agree with `/usr/bin/awk` (version 20200816) on stdout, stderr and
+exit status. Twelve more are divergences this deliberately owns, asserted
 against written-out bytes rather than compared — they are listed below.
 
 **Anything outside those shapes is refused with a diagnostic**, not
@@ -66,19 +72,37 @@ Records are walked by a scalar cursor and every record is a region
 released as `show` answers, so the 33 MB file runs under the loader's
 **default 4,096 handles** (the table above was packaged with them).
 
-## The pattern is literal, not a regular expression
+## Regular expressions (2026-09-17)
 
-The same boundary [`org-ieee-grep`](https://github.com/kotoba-lang/org-ieee-grep)
-ships with as `-F` and [`org-ieee-sed`](https://github.com/kotoba-lang/org-ieee-sed)
-ships with for `s///`, named for the same reason: `string-index-of` finds a
-literal needle and there is no regular expression engine to call.
+Measured over 5,025 single-quoted agent awk programs: 842 hold a regular
+expression — `/A/,/B/` 175 (conflict-marker hunks), `/RE/{print $N}` 71,
+`/RE/,0` 24, `$N ~ /RE/` 36, `/RE/{print $N; exit}` 10. The rest need
+variables (`/RE/{f=1} f&&/RE/`), `NR`, `getline` or `printf`, and are refused.
 
-A pattern holding a metacharacter means something different to the two
-implementations, so the suite compares only literal ones — comparing the rest
-would be comparing two different questions. The same caveat applies to a
-multi-character `-F`, which the system awk reads as an ERE; the suite's
-multi-character separators (`ab`, `aa`, `日`) contain no metacharacter, so both
-sides answer the same question there.
+A pattern is an ERE compiled by `org-ieee-regex` (leftmost-longest, with its
+literal prefilter so a host search skips most records before the
+simulation); a pattern without a metacharacter keeps the literal host search;
+`//` matches every record; `\/` inside a pattern is a slash. Measured on
+`/usr/bin/awk`:
+
+```
+/a/,/b/       a range ENDS ON THE SAME RECORD it starts on when the end
+              matches there too (unlike sed, which tests from the next line);
+              ranges restart after they end
+/a/,0         never ends: from the first match to the end of the input
+/a/,3         a non-zero constant is true: each start is a one-record range
+$2 ~ /b/      the field, split as the record is (-F applies); $9 past the
+              end is the empty string, so $9 ~ /^$/ selects every record
+{print $1; exit}   prints, then stops every operand; exit 0
+/a[/          refused, exit 2, in awk's four-line shape with the engine's
+              words (a named divergence: awk says `nonterminated character
+              class a[`, this says `brackets [ ] not balanced`)
+```
+
+The same caveat as before applies to a multi-character `-F`, which the system
+awk reads as an ERE and this reads literally; the suite's multi-character
+separators (`ab`, `aa`, `日`) contain no metacharacter, so both sides answer
+the same question there.
 
 A **single-character** `-F` is literal in the system awk too — measured: `-F.`
 splits `a.b.c` into three fields and leaves a dotless record alone — so that
@@ -239,7 +263,7 @@ program ends in a multi-byte one. A refused program can end in anything.
 ## Build and test
 
 ```sh
-AMU_HOME=/path/to/amu kbb --backend sci test/awk_test.cljk
+AMU_HOME=/path/to/amu REGEX_HOME=/path/to/org-ieee-regex kbb --backend sci test/awk_test.cljk
 ```
 
 The test compiles `awk/core.kotoba` itself (`compile --target aarch64-macos
@@ -255,9 +279,9 @@ Exactly the four wires used, and no more.
 ## What this is not
 
 No `BEGIN`/`END`, no variables or assignment, no arithmetic or comparison
-patterns, no ranges, no `printf`, `getline`, `split`, `substr`, `gsub`, no
-field assignment, no `-v`, `-f` or `--`, no output redirection, no comma in a
-print list, no regular expressions.
+patterns (`NR>5`, `$1=="x"`), no `!/RE/`, no `&&`/`||`, no `printf`,
+`getline`, `split`, `substr`, `gsub`, no field assignment, no `-v`, `-f` or
+`--`, no output redirection, no comma in a print list, no bare `{exit}`.
 
 ## Standard input
 
