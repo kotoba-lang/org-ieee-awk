@@ -57,6 +57,12 @@
 
 (def system-awk "/usr/bin/awk")
 
+;; The regex engine this links: org-ieee-regex, a sibling checkout by default.
+(def regex-home
+  (or (.-REGEX_HOME js/process.env)
+      (let [guess (.resolve path (.cwd js/process) ".." "org-ieee-regex")]
+        (when (.existsSync fs (.join path guess "regex" "core.kotoba")) guess))))
+
 (def fixtures
   {;; Two records, three fields and two, no surprises.
    "plain"   "one two three\nalpha beta\n"
@@ -98,7 +104,13 @@
    "runs"    "aaaa\n"
    ;; The same trap with content between the separators, which is what
    ;; separates the FIELD walk's advance from the count's.
-   "runs2"   "xaayaaz\n"})
+   "runs2"   "xaayaaz\n"
+   ;; --- regular expressions, ranges, field matches, exit (2026-09-17) ---
+   "range"   "a\nb\nx b\nc\na b\nd\n"
+   "hunk"    "<<<<<<< a\nours\n=======\ntheirs\n>>>>>>> b\nrest\n"
+   "yaml"    "    - name: amu\n      revision: abc\n    - name: sed\n      revision: def\n"
+   "slash"   "a/b\nc\n"
+   "dates"   "2026-08-31 12:23 x\n2026-08-31 13:00 y\n"})
 
 ;; Names a case may use that must NOT exist. Anything else it names must be a
 ;; fixture; `setup-guard` enforces both directions.
@@ -213,6 +225,31 @@
    {:prog "/本/" :files ["utf8"]}
    ;; A pattern over a record with no trailing newline.
    {:prog "/x/" :files ["nonl"]}
+
+   ;; --- regular expressions (2026-09-17, org-ieee-regex) ------------------
+   ;; Measured: 842 of 5,025 agent awk programs hold a regex -- `/A/,/B/`
+   ;; 175, `/RE/{print $N}` 71, `/RE/,0` 24, `$N ~ /RE/` 36, `{...; exit}`
+   ;; 10. Each semantics measured on /usr/bin/awk.
+   {:prog "/^[a-c]$/" :files ["range"]} {:prog "/a|d/" :files ["range"]} {:prog "/(a|x) b/ {print NF}" :files ["range"]}
+   {:prog "$0 ~ /b$/" :files ["range"]} {:prog "/a\\/b/" :files ["slash"]} {:prog "/\\(a\\)/" :files ["range"]}
+   {:prog "/^b+$/" :files ["range"]} {:prog "/b/ {print $1}" :files ["range"]} {:prog "/^$/" :files ["blank"]}
+   {:prog "/^worktree /{print $2}" :files ["range"]}
+   ;; ranges: the end may match the SAME record; `,0` never ends; `,3` ends at once
+   {:prog "/a/,/b/" :files ["range"]} {:prog "/a/,0" :files ["range"]} {:prog "/a/,3" :files ["range"]}
+   {:prog "/a/,/b/{print $1}" :files ["range"]} {:prog "/a/,/b/ {print NF}" :files ["range"]}
+   {:prog "/a/,/b/" :files ["range" "range"]} {:prog "/^<<<<<<</,/^>>>>>>>/" :files ["hunk"]}
+   {:prog "/^<<<<<<</,/^=======/" :files ["hunk"]} {:prog "/c/,/zz/" :files ["range"]}
+   ;; field matches
+   {:prog "$2 ~ /b/" :files ["range"]} {:prog "$1 ~ /^[ax]$/ {print $2}" :files ["range"]}
+   {:prog "$1~/x/" :files ["range"]} {:fs "-F:" :prog "$2 ~ /^b/ {print $1}" :files ["colon"]}
+   {:prog "$0 ~ /2026-08-31 12:2[2-9]|2026-08-31 12:[3-4]/" :files ["dates"]}
+   {:prog "$9 ~ /^$/" :files ["range"]}
+   ;; exit
+   {:prog "/b/{print $1; exit}" :files ["range"]} {:prog "/b/ {print; exit}" :files ["range"]}
+   {:prog "/x/ { print $1 ; exit }" :files ["range"]} {:prog "/zz/{print; exit}" :files ["range"]}
+   {:prog "/revision/{print $2; exit}" :files ["yaml" "yaml"]} {:prog "/b/{print; exit}" :files ["range" "range"]}
+   {:fs "-F:" :prog "/lead/{print $2; exit}" :files ["colon"]}
+   {:prog "/a/,/b/" :stdin "range"} {:prog "$2 ~ /b/ {print $1; exit}" :stdin "range"}
    {:prog "/zz/" :files ["nonl"]}
    ;; A pattern and a separator together.
    {:fs "-F:" :prog "/lead/ {print $2}" :files ["colon"]}
@@ -295,6 +332,21 @@
     :argv ["/foo" :plain]
     :out "" :exit 2
     :err "awk: unsupported program: /foo\n"}
+   ;; A pattern the engine refuses: the exit and the shape are /usr/bin/awk's
+   ;; (`awk: nonterminated character class a[`), the words are the engine's.
+   {:label "a pattern the regex engine refuses: awk's shape, the engine's words"
+    :argv ["/a[/" :plain]
+    :out "" :exit 2
+    :err "awk: brackets [ ] not balanced\n source line number 1\n context is\n\t >>> /a[/ <<< \n"}
+   ;; `!/re/` (3 measured) and a bare `{exit}` are outside the subset.
+   {:label "a negated pattern is refused"
+    :argv ["!/foo/" :plain]
+    :out "" :exit 2
+    :err "awk: unsupported program: !/foo/\n"}
+   {:label "a bare exit action is refused"
+    :argv ["/foo/{exit}" :plain]
+    :out "" :exit 2
+    :err "awk: unsupported program: /foo/{exit}\n"}
    {:label "an empty action is refused"
     :argv ["{}" :plain]
     :out "" :exit 2
@@ -370,7 +422,9 @@
     (doseq [name absent]
       (when (.existsSync fs (.join path data name))
         (refuse (str "declared-absent " name " exists in the fixture directory"))))
-    (let [c (run "node" [amu "compile" src "--target" "aarch64-macos" "--jvm-free"
+    (when-not regex-home (refuse "set REGEX_HOME to an org-ieee-regex checkout"))
+    (let [c (run "node" [amu "compile" src "--source-path" (.resolve path (.cwd js/process))
+                         "--source-path" regex-home "--target" "aarch64-macos" "--jvm-free"
                          "--policy" policy "--output" kexe] {})]
       (when (not= 0 (:status c))
         (refuse (str "compile failed: " (str (:err c)) (str (:out c))))))
